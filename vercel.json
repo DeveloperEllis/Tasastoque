@@ -1,26 +1,22 @@
 {
   "functions": {
-    "app/api/scrape-rates/route.js": { 
+    "pages/api/scrape-rates.js": { 
       "runtime": "docker" 
     }
   },
+
   "builds": [
     {
-      "src": "app/api/scrape-rates/route.js",
+      "src": "pages/api/scrape-rates.js", 
       "use": "@vercel/node"
-      
     }
   ],
-  "rewrites": [
-    {
-      "source": "/api/scrape-rates",
-      "destination": "/app/api/scrape-rates" 
-    }
-  ],
+
   "crons": [
     {
       "path": "/api/scrape-rates",
       "schedule": "0 1 * * *" 
     }
   ]
+
 }
