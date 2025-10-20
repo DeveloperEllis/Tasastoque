@@ -1,7 +1,7 @@
 {
   "builds": [
     {
-      "src": "/api/scrape-rates/route.js",
+      "src": "app/api/scrape-rates/route.js",
       "use": "@vercel/node",
       "config": {
         "runtime": "docker" 
