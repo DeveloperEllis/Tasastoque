@@ -1,0 +1,27 @@
+# Dockerfile
+
+# Usa una imagen base de Node.js (Vercel recomienda Node 18 o superior)
+FROM node:18-slim
+
+# Instala Tesseract OCR y sus dependencias de Linux (necesario en el entorno Vercel/Linux)
+# Esto es equivalente a 'sudo apt install tesseract-ocr'
+RUN apt-get update && \
+    apt-get install -y tesseract-ocr && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Establece el directorio de trabajo
+WORKDIR /usr/src/app
+
+# Copia los archivos del proyecto (package.json, vercel.json, etc.)
+COPY package*.json ./
+COPY vercel.json ./
+
+# Instala las dependencias de Node.js
+RUN npm install
+
+# Copia el resto del código de la aplicación (la carpeta 'app', 'lib', etc.)
+COPY . .
+
+# Comando de inicio de Vercel (no necesita ser modificado)
+CMD ["npm", "run", "dev"]

@@ -1,68 +1,116 @@
 // /app/api/scrape-rates/route.js
 
 import { NextResponse } from 'next/server';
-import { createWorker } from 'tesseract.js';
+import tesseract from 'node-tesseract-ocr';
+import axios from 'axios'; 
 import { createServerClient } from '../../../lib/supabase/supabaseServer.js'; 
 
 export const dynamic = 'force-dynamic'; 
 
 const IMAGE_URL = 'https://wa.cambiocuba.money/trmi.png'; 
 const BASE_CURRENCY = 'CUP'; 
+
+// Mapeo de Monedas: Asegura que todos los códigos de moneda sean de 3 letras.
 const CURRENCY_MAPPING = {
     'USD': 'USD', 'USO': 'USD', 
-    'EURO': 'EUR', 'MLC': 'MLC',
-    'EUR': 'EUR'
+    'EURO': 'EUR', 'EUR': 'EUR', 
+    'MLC': 'MLC', 
+    'GBP': 'GBP', 'CAD': 'CAD', 
+    'MXN': 'MXN', 'BRL': 'BRL', 
+    'ZELLE': 'ZEL', // Mapea ZELLE (5) a ZEL (3)
+    'CLA': 'CLA', 
+    '3': 'CLA', // 💡 Corrección específica para el error "3" de CLA
+    '“3': 'CLA', // 💡 Corrección específica para el error "“3" de CLA
+};
+
+const config = {
+    lang: "eng", 
+    oem: 1,      
+    psm: 6,      
 };
 
 export async function GET() {
-    let worker;
     const ratesToInsert = [];
 
     try {
         const supabase = createServerClient();
         
-        // 1. Inicializar Tesseract Worker. 
-        // CLAVE: worker: false fuerza la ejecución en el proceso principal de Node, 
-        // evitando el error de Worker.
-        worker = await createWorker('eng', 1, { worker: false }); 
+        // 1. DESCARGA A BUFFER
+        const imageResponse = await axios.get(IMAGE_URL, { 
+            responseType: 'arraybuffer'
+        });
+        const imageBuffer = Buffer.from(imageResponse.data);
         
-        // 2. Ejecutar OCR
-        const { data: { text } } = await worker.recognize(IMAGE_URL);
+        // 2. EJECUTAR OCR
+        const text = await tesseract.recognize(imageBuffer, config);
         
-        console.log("--- OCR Texto Crudo ---:\n", text); // Para ver el resultado de la lectura
+        console.log("Texto Crudo Extraído por OCR:\n", text); 
         
-        // 3. Procesamiento y Limpieza del Texto
+        // 3. PROCESAMIENTO, LIMPIEZA Y EXTRACCIÓN
         const lines = text.split('\n').filter(line => line.trim() !== '');
-        const dataLines = lines.slice(1); 
+        // Omitimos la primera línea y la última (información de ESTABLECIDA/VICENTE)
+        const dataLines = lines.slice(1, -1); 
 
         for (const line of dataLines) {
-            const parts = line.trim().split(/\s+/).filter(p => p.length > 0);
+            // Limpieza robusta de ruido
+            let cleanedLine = line
+                .replace(/i/g, 'l') 
+                .replace(/O/g, '0') 
+                .replace(/Pr|Pz|As|=S5|A”|V”°|V””|-|\/|\||“|'|<-|\[|\]/g, '') 
+                .replace(/\s+/g, ' ') 
+                .trim();
             
-            if (parts.length >= 3) {
-                let currencyName = parts[0].toUpperCase();
-                let rateText = parts[2]; 
+            const parts = cleanedLine.split(' ').filter(p => p.length > 0);
+            
+            if (parts.length < 3) continue;
 
-                const currencyCode = CURRENCY_MAPPING[currencyName] || null;
-                const rate = parseFloat(rateText.replace(/[^0-9.]/g, '')); 
+            // Identificar el nombre de la moneda
+            let currencyName = (parts[0] === '1' ? parts[1] : parts[0]).toUpperCase();
 
-                if (currencyCode && !isNaN(rate) && rate > 0) {
-                    ratesToInsert.push({
-                        currency_from: currencyCode, 
-                        currency_to: BASE_CURRENCY, 
-                        rate: rate, 
-                    });
-                }
+            // 💡 Paso 3.1: Mapeo y Saneamiento del Código de Moneda
+            let currencyCode = CURRENCY_MAPPING[currencyName];
+
+            if (!currencyCode) {
+                 // Si falla el mapeo, cortamos a 3 (ej. 'CLAVE' -> 'CLA')
+                 currencyCode = currencyName.substring(0, 3);
+            }
+            
+            // 💡 Paso 3.2: Localización de la Tasa
+            // Usamos una expresión regular para encontrar el primer número que parezca una tasa.
+            // Esto es más robusto que buscar por posición.
+            const rateMatch = line.match(/(\d+\.\d{2})/); // Busca un patrón como "450.48" o "23.53"
+            
+            let rateText = rateMatch ? rateMatch[0] : null;
+
+            if (!rateText) continue;
+
+            const rate = parseFloat(rateText); 
+
+            if (!isNaN(rate) && rate > 0) {
+                // -----------------------------------------------------
+                // 4. INSERCIÓN BIDIRECCIONAL 
+                // -----------------------------------------------------
+
+                // A. Tasa Directa (Ej. ZEL -> CUP)
+                ratesToInsert.push({
+                    currency_from: currencyCode, 
+                    currency_to: BASE_CURRENCY, 
+                    rate: rate,
+                });
+
+                // B. Tasa Invertida/Recíproca (Ej. CUP -> ZEL)
+                const reciprocalRate = 1 / rate;
+
+                ratesToInsert.push({
+                    currency_from: BASE_CURRENCY, 
+                    currency_to: currencyCode,    
+                    rate: reciprocalRate,         
+                });
             }
         }
 
-        // 4. Upsert en Supabase
+        // 5. UPSERT EN SUPABASE
         if (ratesToInsert.length > 0) {
-            // ... (Lógica de upsert en Supabase) ...
-            
-            // Simulación de éxito si no quieres conectar la DB ahora:
-            // return NextResponse.json({ success: true, message: `Simulación de éxito. ${ratesToInsert.length} tasas encontradas.` }, { status: 200 });
-            
-            // Código real de DB
             const { error: dbError } = await supabase
                 .from('exchange_rates') 
                 .upsert(ratesToInsert, { 
@@ -70,29 +118,25 @@ export async function GET() {
                     fields: ['rate', 'updated_at'] 
                 });
 
-            if (dbError) {
-                console.error("Error de Supabase al insertar/actualizar:", dbError);
-                throw new Error(dbError.message);
-            }
+            const finalCount = ratesToInsert.length; 
+            
+            if (dbError) throw new Error(dbError.message);
+
+            return NextResponse.json(
+                { success: true, message: `OCR exitoso. Se insertaron ${finalCount} registros bidireccionales.` }, 
+                { status: 200 }
+            );
+
         } else {
-            throw new Error(`OCR no pudo extraer datos válidos. Texto: ${text}`);
+            throw new Error(`OCR no pudo extraer datos válidos. Texto completo: ${text}`);
         }
         
-        return NextResponse.json(
-            { success: true, message: `OCR exitoso. ${ratesToInsert.length} tasas actualizadas.` }, 
-            { status: 200 }
-        );
-
     } catch (error) {
         console.error('Fallo en el proceso OCR/Guardado:', error.message);
         
-        if (worker) await worker.terminate();
-        
         return NextResponse.json(
-            { success: false, message: 'Fallo OCR/Inserción.', error: error.message },
+            { success: false, message: 'Fallo al actualizar las tasas.', error: error.message },
             { status: 500 }
         );
-    } finally {
-        if (worker) await worker.terminate();
     }
 }

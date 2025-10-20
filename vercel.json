@@ -1,0 +1,17 @@
+{
+  "builds": [
+    {
+      "src": "/api/scrape-rates/route.js",
+      "use": "@vercel/node",
+      "config": {
+        "runtime": "docker" 
+      }
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/scrape-rates",
+      "schedule": "0 * * * *"
+    }
+  ]
+}
